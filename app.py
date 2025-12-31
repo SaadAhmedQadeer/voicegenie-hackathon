@@ -1,36 +1,63 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
-import os
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="VoiceGenie: Gemini + ElevenLabs", page_icon="🎙️")
+st.set_page_config(page_title="VoiceGenie", page_icon="🎙️")
 
 st.title("🎙️ VoiceGenie: The Speaking AI")
-st.markdown("### Powered by Google Cloud Gemini & ElevenLabs")
 
 # --- SIDEBAR: API KEYS ---
 st.sidebar.header("Configuration")
-st.sidebar.info("Enter your API keys to start.")
-
 google_api_key = st.sidebar.text_input("Google Gemini API Key", type="password")
 elevenlabs_api_key = st.sidebar.text_input("ElevenLabs API Key", type="password")
 
-# --- CORE FUNCTIONS ---
+# --- AUTO-FIX FUNCTIONS ---
 
-def get_gemini_response(prompt, api_key):
+def get_working_gemini_model(api_key):
+    """Try to find a working model automatically."""
     try:
         genai.configure(api_key=api_key)
-        # UPDATED: Changed to 'gemini-1.5-flash' (Newer, faster, works better)
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        # Priority list of models to try
+        candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro', 'gemini-pro']
+        
+        # 1. Try to list models explicitly
+        available_models = []
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+        except:
+            pass # If listing fails, we just try the candidates blindly
+
+        # 2. Match candidates against available ones (or just try them)
+        for candidate in candidates:
+            # Check if this candidate is in the available list (if we have one)
+            # OR just try to use it if listing failed.
+            model = genai.GenerativeModel(candidate)
+            try:
+                # Test the model with a tiny prompt
+                model.generate_content("Hi")
+                return candidate # It worked!
+            except:
+                continue # Try next one
+        
+        return None # No models worked
+    except Exception as e:
+        return None
+
+def get_gemini_response(prompt, api_key, model_name):
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Error with Google Gemini: {str(e)}"
+        return f"Gemini Error: {str(e)}"
 
 def text_to_speech(text, api_key):
-    # UPDATED: Using a standard Voice ID (Rachel)
-    url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM" 
+    # VOICE ID: Rachel (Standard US English)
+    url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
     headers = {
         "Accept": "audio/mpeg",
         "Content-Type": "application/json",
@@ -38,49 +65,52 @@ def text_to_speech(text, api_key):
     }
     data = {
         "text": text,
-        # UPDATED: Changed to 'eleven_multilingual_v2' (Supported on Free Tier)
+        # IMPORTANT: This model IS available on free tier
         "model_id": "eleven_multilingual_v2", 
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.5
-        }
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
     }
     try:
         response = requests.post(url, json=data, headers=headers)
         if response.status_code == 200:
             return response.content
         else:
-            # Return the error text so we can see it in the app if it fails
-            st.error(f"ElevenLabs Error: {response.text}")
-            return None
+            return f"ElevenLabs API Error: {response.text}"
     except Exception as e:
-        st.error(f"Connection Error: {str(e)}")
-        return None
+        return f"Connection Error: {str(e)}"
 
 # --- MAIN APP LOGIC ---
 
-user_input = st.text_area("What do you want to ask?", "Explain quantum physics in 2 sentences.")
+user_input = st.text_area("Ask me anything:", "Tell me a fun fact about coding.")
 
-if st.button("Generate & Speak"):
+if st.button("Generate Response"):
     if not google_api_key or not elevenlabs_api_key:
-        st.warning("Please enter both API Keys in the sidebar!")
+        st.error("❌ Please enter both API keys in the sidebar.")
     else:
-        with st.spinner("Consulting Google Gemini..."):
-            # 1. Get Text from Gemini
-            ai_text = get_gemini_response(user_input, google_api_key)
+        # 1. FIND WORKING MODEL
+        with st.spinner("Connecting to Google..."):
+            # We try to find a valid model dynamically
+            valid_model = get_working_gemini_model(google_api_key)
+        
+        if not valid_model:
+            st.error("❌ Could not find a working Gemini model. Check your API Key.")
+        else:
+            st.success(f"Connected to: {valid_model}")
             
-            # Check if Gemini actually returned text or an error
-            if "Error with Google Gemini" in ai_text:
+            # 2. GET TEXT
+            with st.spinner(f"Thinking ({valid_model})..."):
+                ai_text = get_gemini_response(user_input, google_api_key, valid_model)
+            
+            if "Gemini Error" in ai_text:
                 st.error(ai_text)
             else:
-                st.markdown("### 🤖 Gemini Says:")
                 st.write(ai_text)
-
-                with st.spinner("Synthesizing Voice with ElevenLabs..."):
-                    # 2. Get Audio from ElevenLabs
-                    audio_bytes = text_to_speech(ai_text, elevenlabs_api_key)
-                    
-                    if audio_bytes:
-                        st.markdown("### 🔊 ElevenLabs Voice:")
-                        st.audio(audio_bytes, format="audio/mp3")
-                        st.success("Process Complete!")
+                
+                # 3. GET VOICE
+                with st.spinner("Synthesizing Voice..."):
+                    audio_result = text_to_speech(ai_text, elevenlabs_api_key)
+                
+                if isinstance(audio_result, bytes):
+                    st.audio(audio_result, format="audio/mp3")
+                    st.success("Done!")
+                else:
+                    st.error(audio_result)
